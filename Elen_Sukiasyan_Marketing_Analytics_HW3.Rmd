@@ -1,0 +1,295 @@
+---
+title: "Marketing Analytics"
+author: "Elen Sukiasyan"
+date: "2024-04-30"
+output: pdf_document
+---
+
+
+```{r, include=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggpubr) 
+library(knitr)
+library(zoo)
+library(survival)
+library(simsurv) 
+library(survminer)
+library(pec)
+library(SurvRegCensCov)
+library(mstate)
+library(viridis)
+library(RColorBrewer)
+setwd("/Users/elensukiasyan/Downloads")
+data <- read.csv("telco.csv", header = TRUE)
+str(data)
+head(data)
+```
+
+```{r}
+# Encode 'churn' variable: If 'churn' equals 'Yes', encode as 1, else encode as 0
+data$churn<-ifelse(data$churn=='Yes',1,0)
+# Categorical Variable Conversion
+data$marital <- as.factor(data$marital)
+data$ed <- as.factor(data$ed)
+data$retire <- as.factor(data$retire)
+data$gender <- as.factor(data$gender)
+data$voice <- as.factor(data$voice)
+data$internet <- as.factor(data$internet)
+data$forward <- as.factor(data$forward)
+data$custcat <- as.factor(data$custcat)
+```
+
+
+
+```{r}
+# Creating survival object
+surv_obj <- Surv(time = data$tenure, event = data$churn)
+
+# Defining a function to fit accelerated failure time (AFT) model
+fit_aft_model <- function(dist) {
+  # Fitting AFT model using survreg function
+  model <- survreg(
+    surv_obj ~ age + marital + address + income + ed + retire + gender + voice + internet + forward + custcat,
+    data = data,
+    dist = dist
+  )
+  return(model)
+}
+
+#Get Available Distributions:
+distributions <- names(survreg.distributions)
+
+#Fit AFT Models with All Available Distributions
+models <- lapply(distributions, fit_aft_model)
+```
+
+
+```{r}
+new_data <- data.frame(
+  age = mean(data$age), 
+  marital = as.factor(names(which.max(table(data$marital)))),
+  address = mean(data$address), 
+  income = mean(data$income), 
+  ed = as.factor(names(which.max(table(data$ed)))),
+  retire = as.factor(names(which.max(table(data$retire)))),
+  gender = as.factor(names(which.max(table(data$gender)))),
+  voice = as.factor(names(which.max(table(data$voice)))),
+  internet = as.factor(names(which.max(table(data$internet)))),
+  forward = as.factor(names(which.max(table(data$forward)))),
+  custcat = as.factor(names(which.max(table(data$custcat)))),
+  tenure = median(data$tenure)
+)
+```
+
+```{r}
+
+# Define a function to generate survival curves
+survival_curves <- function(models, dist) {
+  probs <- seq(0.1, 0.9, length = 9)
+  all_data <- data.frame()
+  
+  # Iterate through models and add survival data to the dataframe
+  for (i in seq_along(models)) {
+    # Predict survival probabilities using the fitted model
+    pred_surv <- predict(models[[i]], type = "quantile", p = 1 - probs, newdata = new_data)
+    data <- data.frame(Time = pred_surv, Probabilities = probs, Distribution = dist[i])
+    all_data <- rbind(all_data, data)
+  }
+  return(all_data)
+}
+
+survival_curve<-survival_curves(models, distributions)
+survival_curve
+
+```
+
+
+```{r}
+plt <- ggplot(data = survival_curve, aes(x = Time, y = Probabilities, color = Distribution)) +
+    geom_line(size = 1) +
+    theme_minimal() +
+    labs(x = "Time", y = "Survival Probability", title = "Survival Curves for Different Distributions") +
+    theme(legend.position = "bottom") +
+    geom_abline(intercept = 0, slope = 0)
+
+print(plt)
+```
+
+From the results it is obvious that the best survival curve is the lognormal one.
+
+To improve model selection, we can consider additional statistical measures like the Akaike Information Criterion (AIC) and the Bayesian Information Criterion (BIC). Lower AIC and BIC values indicate better model performance. 
+```{r}
+# Create an empty dataframe to store decision data
+decision_data <- data.frame()
+for (i in seq_along(models)) {
+  # Extract log likelihood, AIC, and BIC values for each model
+  loglikelihood <- models[[i]]$loglik
+  aic <- AIC(models[[i]])
+  bic <- BIC(models[[i]])
+  data_aic_bic <- data.frame(Loglikelihood = loglikelihood, AIC = aic, BIC = bic, Distribution = distributions[i])
+  # Append data to decision_data dataframe
+  decision_data <- rbind(decision_data, data_aic_bic)
+}
+
+min_bic <- min(decision_data$BIC)
+min_aic <- min(decision_data$AIC)
+
+decision_data
+```
+In our analysis, we observe that the model with a lognormal distribution yields the minimum AIC (2951.151) and BIC (3039.491). Therefore, based on these criteria, we again select the model with a lognormal distribution as our final choice.
+
+
+#Feature Signnificance
+Then which features are influential for the model. Initially, we'll incorporate all available features into the model and evaluate their significance. (Alpha = 0.1)
+
+```{r}
+# Fitting a model with all features and examining their significance
+feauture_testing_model <- survreg(surv_obj ~ age + marital + address + income + ed + retire + gender + voice + internet + forward + custcat, data = data, dist = "lognormal")
+summary_results <- summary(feauture_testing_model)
+summary_results
+# Checking features with p-values less than 0.1
+significant_features <- summary_results$table[, 4] < 0.10
+significant_features
+```
+As some features had p values > 1, hence we need to exclude them from the model.
+
+```{r}
+# Building the final model with selected features
+final_model <- survreg(surv_obj ~ age + marital + address + ed + voice + internet + custcat, data = data, dist = "lognormal")
+summary_final <- summary(final_model)
+summary_final
+exp_coefs <- exp(coef(final_model))
+exp_coefs
+```
+
+.For each additional year of a customer's age, there's a 3% increase in hazard.
+.Unmarried individuals have roughly a 36% lower hazard compared to married ones.
+.Education levels are compared to the "College Degree" target group:
+.Individuals who did not complete high school have a 38% higher hazard.
+.Individuals with a high school education have a 32% higher hazard.
+.Individuals with a post-Undergrad degree have approximately a 1% lower hazard.
+.Individuals who did some college have a 29% higher hazard.
+.Having "Voice yes" results in approximately a 35% lower hazard compared to the "Voice No" group.
+.Having "Internet yes" leads to roughly a 55% lower hazard compared to the "Internet No" group.
+.Customer categories are compared to the "Basic service" target group:
+."E-service" customers have a 189% higher hazard.
+."Plus Service" customers have a 123% higher hazard.
+."Total Service" customers have a 188% higher hazard.
+
+```{r}
+new_data <- data.frame(
+  age = mean(data$age), 
+  marital = as.factor(names(which.max(table(data$marital)))),
+  address = mean(data$address), 
+  income = mean(data$income), 
+  ed = as.factor(names(which.max(table(data$ed)))),
+  retire = as.factor(names(which.max(table(data$retire)))),
+  gender = as.factor(names(which.max(table(data$gender)))),
+  voice = as.factor(names(which.max(table(data$voice)))),
+  internet = as.factor(names(which.max(table(data$internet)))),
+  forward = as.factor(names(which.max(table(data$forward)))),
+  custcat = as.factor(names(which.max(table(data$custcat)))),
+  tenure = median(data$tenure) # Median tenure value for prediction
+)
+```
+
+
+
+```{r}
+# Making predictions using the final model
+predictions <- predict(final_model, type = "response", newdata = data)
+
+# Creating a dataframe with predictions
+predictions_data <- data.frame(predictions)
+
+# Adjusting predictions for CLV calculation
+sequence <- seq(1, length(colnames(predictions_data)), 1)
+MM <- 1300  # Monthly margin assumption
+r <- 0.1  # Discount rate assumption
+for (num in sequence) {
+  predictions_data[, num] <- predictions_data[, num] / (1 + r / 12) ^ (sequence[num] - 1)
+}
+
+# Calculating CLV
+predictions_data$CLV <- MM * rowSums(predictions_data)
+
+# Summary statistics of CLV
+summary(predictions_data$CLV)
+
+# Plotting CLV distribution
+examine_data <- head(predictions_data, 24)
+ggplot(examine_data, aes(x = CLV)) +
+  labs(title = "CLV Distribution") +
+  geom_histogram()
+
+```
+
+##CLV Comparison: Female and Male customers
+
+```{r}
+# Adding CLV to telco dataframe
+data$CLV <- predictions_data$CLV
+
+# Subset of data for examination
+examine_data <- head(data, 24)
+examine_data
+
+# Comparing CLVs by gender
+ggplot(examine_data, aes(x = CLV, color = gender)) +
+  labs(title = "CLV Density By Gender") +
+  geom_density()
+```
+
+
+From this graph we can see variations in CLV between males and females focused on the first 24 months for simplification. It's apparent that males tend to exhibit lower initial spending compared to females, but as time progresses, males make more consistent and higher-value purchases. Interestingly, both genders typically make a single substantial purchase at the outset, followed by consistent smaller purchases over time.
+
+##CLV Comparison: Married and Unmarried customers
+
+```{r}
+ggplot(examine_data, aes(x = CLV, color = marital)) +
+  labs(title = "Customer Lifetime Value Density by Marital Status") +
+  geom_density()
+```
+From this comparison of CLV s ov married and unmarried customers we can see that singles typically start with significant purchases but then show inconsistency over time. Married individuals, however, make smaller but consistent purchases after an initial large one. At the end of the graph we can also see that unmarried individuals can start soing purchases after long time not showing any activity.
+
+
+##CLV Comparison: Education
+
+```{r}
+ggplot(examine_data, aes(x = CLV, color = ed)) +
+  labs(title = "Customer Lifetime Value Density by Education") +
+  geom_density()
+```
+
+This graph shows analyzation of customers' education levels. Those without high school diplomas tend to make consistent purchases over time. Customers with post-undergraduate degrees initially make high-value purchases but then decrease fastly. This could be because they opt for premium products early on. Customers with only college degree show inconsistent purchasing behavior, likely due to experimenting with different products. High school graduates behave similarly to those with post-undergraduate degrees but start with lower-priced purchases. Overall, both groups demonstrate consistency in their purchasing patterns.
+
+## Final conclusions 
+
+Based on the findings, the most valuable clients for long-term business success appear to be married individuals. They demonstrate consistent purchasing behavior over time, which is a positive indicator for the business. Next in line are male customers, who also exhibit a consistent purchasing pattern. Regarding education, those who did not complete high school tend to make frequent purchases. Additionally, customers with post-undergraduate degrees make high-value purchases, contributing significantly to the business. Overall, considering consistency and high-value purchases, married males emerge as the most valuable clients.
+
+
+## Retention rate
+```{r}
+# Estimate churn rate for yearly prediction (considering 12 months)
+churn_rate <- mean(predictions <= 12)  
+
+# Calculate total number of customers
+total_customers <- nrow(data)
+
+# Determine the count of at-risk customers
+at_risk_customers <- total_customers * churn_rate
+
+# Compute the average Customer Lifetime Value (CLV)
+average_clv <- mean(data$CLV)  
+
+# Calculate the retention budget
+retention_budget <- at_risk_customers * average_clv
+retention_budget
+```
+
+
+##  What else would I suggest for retention?
+
+To improve retention, it's crucial to segment at-risk customers and assess their value to the company.By that we will undesrtand is that customer worthy for spending resources or not (focus resources on retaining high-value customers). For valuable at-risk customers, we can implement targeted promotions and discounts. Another effective strategy is to maintain regular communication with customers through surveys or events to enhance loyalty and ensure continued engagement.
